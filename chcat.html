@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="A single-file large language model dialogue page">
+    <title>Chcat</title>
+</head>
+<style>
+    body {
+        display: grid;
+        grid-template-rows: 1fr 108px;
+        height: 100vh;
+        margin: 0;
+        overflow: hidden;
+    }
+
+    main {
+        overflow: auto;
+    }
+
+    main div {
+        width: 95%;
+        max-width: 1200px;
+        margin-bottom: 32px;
+        margin: 0 auto;
+        word-wrap: break-word;
+    }
+
+    footer {
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        flex-direction: column;
+    }
+
+    footer div {
+        width: 100%;
+        max-width: 600px;
+    }
+
+    a {
+        text-decoration: none;
+        color: #333;
+    }
+
+    a:hover {
+        color: #666;
+    }
+</style>
+
+<body>
+    <script>
+        /**
+         * 配置对象，用于设置和管理聊天功能的相关参数。
+         * streamChat 和 chatUrl 都是Post请求，返回的数据格式随意，但是需要提供一个转换函数。
+         * 
+         * @type {Object}
+         * @property {number} maxMessageLength - 允许的最大消息长度。
+         * @property {string} systemPrompt - 系统提示消息，用于显示在聊天界面的顶部。
+         * @property {boolean} persistHistory - 是否持久化聊天历史。如果为 true，聊天记录将被保存。
+         * @property {boolean} streamChat - 是否开启聊天流模式。流模式下，聊天消息将实时发送和接收。
+         * @property {string} streamChatUrl - 当 streamChat 为 true 时，用于实时聊天的服务器端点 URL。
+         * @property {string} chatUrl - 用于非实时聊天（普通请求-响应模式）的服务器端点 URL。
+         * @property {function} streamChatDataConverte - 函数用于转换从 streamChatUrl 接收到的数据。
+         * @property {function} chatMessageConverte - 函数用于转换从 chatUrl 接收到的聊天消息数据。
+         */
+        const config = {
+            maxMessageLength: 100,
+            systemPrompt: "",
+            persistHistory: true,
+            streamChat: false,
+            streamChatUrl: "/stream_chat",
+            chatUrl: "/chat",
+            streamChatDataConverte: (data) => {
+                return data;
+            },
+            chatMessageConverte: (data) => {
+                return data;
+            }
+        }
+
+        class MessageList extends HTMLElement {
+            constructor() {
+                super();
+            }
+            appendMessageCard(role, message) {
+                const messageCard = new MessageCard(role, message);
+                this.appendChild(messageCard);
+                return messageCard;
+            }
+            randerMessages(messages) {
+                console.log(messages);
+                messages.forEach((message) => {
+                    this.appendMessageCard(message.role, message.message);
+                });
+            }
+        }
+
+        customElements.define('message-list', MessageList);
+
+        class MessageCard extends HTMLElement {
+            constructor(role = '', message = '') {
+                super();
+                this.roleTextContent = role;
+                this.messageTextContent = message;
+            }
+
+
+            connectedCallback() {
+                this.container = document.createElement('article');
+                this.roleSpan = document.createElement('h4');
+                this.message = document.createElement('p');
+
+                this.container.appendChild(this.roleSpan);
+                this.container.appendChild(this.message);
+                this.appendChild(this.container);
+
+                this.container.style.width = '100%';
+                this.container.style.boxSizing = 'border-box';
+                if (this.roleTextContent !== '') {
+                    this.roleSpan.textContent = this.roleTextContent;
+                } else {
+                    this.roleSpan.textContent = this.getAttribute('role');
+                }
+
+                if (this.messageTextContent !== '') {
+                    this.message.textContent = this.messageTextContent;
+                } else {
+                    this.message.textContent = this.getAttribute('message');
+                }
+
+                const style = document.createElement('style');
+                style.textContent = `
+                    article {
+                        padding: 8px;
+                        margin: 8px;
+                        border: 1px solid #898ea4;
+                        border-radius: 8px;
+                        background-color: f5f7ff;
+                        box-shadow: 0 0 4px rgba(0, 0, 0, 0.1);
+                    }
+                    h4 {
+                        margin: 0;
+                        color: #333;
+                    }
+                    p {
+                        margin: 0;
+                        color: #666;
+                    }
+                `;
+                this.appendChild(style);
+            }
+
+            setAttribute(name, value) {
+                if (name === 'message') {
+                    this.message.textContent = value;
+                } else {
+                    super.setAttribute(name, value);
+                }
+            }
+
+            setMessage(message) {
+                this.message.textContent = message;
+            }
+
+
+        }
+
+        customElements.define('message-card', MessageCard);
+
+        class MessageInput extends HTMLElement {
+            constructor() {
+                super();
+            }
+
+            connectedCallback() {
+                this.container = document.createElement('div');
+                this.container.style.width = '100%';
+                this.container.style.height = '100%';
+                this.container.style.display = 'flex';
+
+                this.textarea = document.createElement('textarea');
+                this.textarea.placeholder = '请输入消息';
+                this.button = document.createElement('button');
+                this.button.textContent = '发送';
+                this.button.addEventListener('click', () => {
+                    if (this.onSend) {
+                        this.onSend(this.textarea.value);
+                        this.textarea.value = '';
+                    }
+                });
+                this.container.appendChild(this.textarea);
+                this.container.appendChild(this.button);
+                const style = document.createElement('style');
+                style.textContent = `
+                    textarea {
+                        margin: 8px;
+                        flex-grow: 1;
+                        resize: none;
+                        border: 1px solid #898ea4;
+                        border-radius: 8px;
+                        padding: 8px;
+                        box-shadow: 0 0 4px rgba(0, 0, 0, 0.1);
+                        font-size: 16px;
+                        line-height: 1.5;
+                    }
+
+                    button {
+                        margin-top: auto;
+                        margin-bottom: 8px;
+                        height: 32px;
+                        width: 64px;
+                        cursor: pointer;
+                        border: none;
+                        border-radius: 8px;
+                        background-color: #f5f7ff;
+                        box-shadow: 0 0 4px rgba(0, 0, 0, 0.1);
+                        transition:  transform .3s;
+
+                    }
+
+                    button:hover {
+                        background-color: #e6e9ff;
+                    }
+
+                    button:active {
+                        background-color: #ccd8ff;
+                    }
+                `;
+                this.appendChild(this.container);
+                this.appendChild(style);
+            }
+
+            onSend(onSend) {
+                this.onSend = onSend;
+            }
+        }
+
+        customElements.define('message-input', MessageInput);
+
+        class Store {
+            constructor(enablePersist = true) {
+                this.messages = [];
+                this.storage = window.localStorage;
+                this.enablePersist = enablePersist;
+            }
+            loadMessages() {
+                if (!this.enablePersist) {
+                    this.messages = [];
+                    return;
+                }
+                const messages = this.storage.getItem('messages');
+                if (messages) {
+                    this.messages = JSON.parse(messages);
+                }
+            }
+            persistMessages() {
+                if (!this.enablePersist) {
+                    return;
+                }
+                console.log('persistMessages', this.messages);
+                this.storage.setItem('messages', JSON.stringify(this.messages));
+            }
+            getFirstMessage() {
+                return this.messages[0];
+            }
+            setFirstMessage(message) {
+                this.messages[0] = message;
+                this.persistMessages();
+            }
+            setMessage(index, message) {
+                this.messages[index] = message;
+                this.persistMessages();
+            }
+            appendMessage(message) {
+                const length = this.messages.push(message);
+                if (this.messages.length > 100) {
+                    this.messages.shift();
+                }
+                this.persistMessages();
+                return length - 1;
+            }
+            setLastMessage(message) {
+                this.messages[this.messages.length - 1] = message;
+                this.persistMessages();
+            }
+
+            getMessages() {
+                return this.messages;
+            }
+        }
+        const store = new Store(config.persistHistory);
+        store.loadMessages();
+        if (store.messages.length === 0 && config.systemPrompt !== '') {
+            store.appendMessage({
+                role: 'System',
+                message: config.systemPrompt
+            });
+        }
+
+        if (store.messages.length !== 0 && config.systemPrompt !== '') {
+            if (store.getFirstMessage().role !== 'System' || store.getFirstMessage().message !== config.systemPrompt) {
+                // 显示一个对话框，询问是否要清空历史记录
+                if (confirm('是否清空历史记录？')) {
+                    store.messages = [];
+                    store.persistMessages();
+                }
+            }
+        }
+    </script>
+    <main>
+        <div>
+            <message-list id="message-list"></message-list>
+        </div>
+    </main>
+    <footer>
+        <div>
+            &nbsp;&nbsp;
+            <a href="javascript:void(0)" onclick="restart()">重新开始</a>
+        </div>
+        <div>
+            <message-input id="message-input"></message-input>
+        </div>
+    </footer>
+    <script>
+        function restart() {
+            store.messages = [];
+            store.persistMessages();
+            window.location.reload();
+        }
+        const main = document.querySelector('main');
+        let autoScroll = true;
+        setTimeout(() => {
+            main.scrollTop = main.scrollHeight;
+        }, 10);
+
+        main.addEventListener('scroll', () => {
+            if (main.scrollTop + main.clientHeight < (main.scrollHeight - 4)) {
+                autoScroll = false;
+            } else {
+                autoScroll = true;
+            }
+        });
+
+        const messageList = document.getElementById('message-list');
+        messageList.randerMessages(store.getMessages());
+
+        const messageInput = document.getElementById('message-input');
+        let chatLock = false;
+
+        messageInput.onSend = (message) => {
+            if (message === undefined || message.length === 0) {
+                return;
+            }
+            if (chatLock) {
+                alert('请等待上一条消息发送完成');
+                return;
+            }
+            chatLock = true;
+            const userMessageCard = messageList.appendMessageCard('User', message);
+            store.appendMessage({
+                role: 'User',
+                message: message
+            });
+            const assistantMessageCard = messageList.appendMessageCard('Assistant', "正在思考中...");
+            const messageIndex = store.appendMessage({
+                role: 'Assistant',
+                message: ""
+            });
+
+            const chatFunction = config.streamChat ? streamChat : chat;
+
+            chatFunction(
+                store.getMessages(),
+                (result) => {
+                    assistantMessageCard.setMessage(result.message);
+                    store.setMessage(messageIndex, result)
+                    if (autoScroll) {
+                        main.scrollTop = main.scrollHeight;
+                    }
+                },
+                (result) => {
+                    assistantMessageCard.setMessage(result.message);
+                    store.setMessage(messageIndex, result);
+                    if (autoScroll) {
+                        main.scrollTop = main.scrollHeight;
+                    }
+                    chatLock = false;
+                    console.log('chat complete');
+                },
+                (error) => {
+                    console.error(error);
+                    chatLock = false;
+                }
+            );
+
+        };
+        /**
+         * @typedef {Object} Message
+         * @property {string} role - 角色，例如 'Assistant'
+         * @property {string} message - 消息内容
+         */
+
+        /**
+         * streamChat函数模拟一个流式返回的聊天过程，每50毫秒返回一条消息块，直到发送100个消息块组成一个完整的消息.
+         * TODO: 请将chat函数的实现自行替换为调用后端API的方式
+         * @param {Message[]} messages - 要发送的消息数组
+         * @param {function(Message): void} onReceiveMessage - 当接收到消息时的回调函数
+         * @param {function(Message): void} onComplete - 当所有消息发送完毕时的回调函数
+         * @param {function(Error): void} onError - 当出现错误时的回调函数
+         */
+        function streamChat(messages, onReceiveMessage, onComplete, onError) {
+            let message = '';
+            function onSseReceiveData(data) {
+                message += data;
+                onReceiveMessage({
+                    role: 'Assistant',
+                    message: config.streamChatDataConverte(message)
+                });
+            }
+            function onSseComplete() {
+                onComplete({
+                    role: 'Assistant',
+                    message: message
+                });
+            }
+            postSseRequest(config.streamChatUrl, messages, onSseReceiveData, onSseComplete, onError)
+        }
+
+        /**
+       * postSseRequest 函数发送一个POST请求，返回一个SSE流。因为这个逻辑较为复杂，所以单独提取出来。
+       * @param {string} url - 要发送请求的URL
+       * @param {Object} body - 要发送的消息对象
+       * @param {function(string): void} onReceiveMessage - 当接收到消息时的回调函数
+       * @param {function(string): void} onComplete - 当所有消息发送完毕时的回调函数
+       * @param {function(Error): void} onError - 当出现错误时的回调函数
+       */
+        async function postSseRequest(url, body, onReceiveMessage, onComplete, onError) {
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'text/event-stream'
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+                let buffer = '';
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) {
+                        console.log("stream complete");
+                        onComplete();
+                        break;
+                    }
+                    if (value) {
+                        [...value].forEach((char) => {
+                            buffer += char;
+                            if (buffer.startsWith("data: ") && buffer.endsWith('\n\n')) {
+                                let data = buffer.substring(6, buffer.length - 2);
+                                data = data.replaceAll('\ndata:', '\n')
+                                if (data) {
+                                    onReceiveMessage(data);
+                                }
+                                buffer = '';
+                            }
+
+                        });
+                    }
+                }
+            } catch (error) {
+                onError(error);
+            }
+        }
+
+        /**
+         * chat函数模拟一个简单的聊天过程，100毫秒后返回一条消息
+         * TODO: 请将chat函数的实现自行替换为调用后端API的方式
+         * @param {Message[]} messages - 要发送的消息数组
+         * @param {function(Message): void} onReceiveMessage - 当接收到消息时的回调函数
+         * @param {function(Message): void} onComplete - 当所有消息发送完毕时的回调函数
+         * @param {function(Error): void} onError - 当出现错误时的回调函数
+         */
+
+        async function chat(messages, onReceiveMessage, onComplete, onError) {
+            try {
+                const response = await fetch(config.chatUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(messages)
+                });
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const result = await response.text();
+                onComplete({
+                    role: 'Assistant',
+                    message: config.chatMessageConverte(result)
+                });
+            } catch (error) {
+                onError(error);
+            }
+        }
+
+
+
+
+    </script>
+</body>
+
+</html>
